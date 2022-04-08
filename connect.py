@@ -18,36 +18,33 @@ import textwrap
 import getpass
 import fnmatch
 import readline
-import django
 import datetime
 from multiprocessing import Pool
 
 os.environ['DJANGO_SETTINGS_MODULE'] = 'easeserver.settings'
-if django.get_version() != '1.6':
-    django.setup()
 from juser.models import User
 from jlog.models import Log
 from easeserver.api import CONF, BASE_DIR, ServerError, user_perm_group_api, user_perm_group_hosts_api, get_user_host
 from easeserver.api import AssetAlias, get_connect_item
 
+
 try:
     import termios
     import tty
 except ImportError:
-    print '\033[1;31mOnly unix like supported.\033[0m'
+    print '\033[1;31mOnly UnixLike supported.\033[0m'
     time.sleep(3)
     sys.exit()
 
 CONF.read(os.path.join(BASE_DIR, 'easeserver.conf'))
-log_dir = os.path.join(BASE_DIR, 'logs')
-login_name = getpass.getuser()
+LOG_DIR = os.path.join(BASE_DIR, 'logs')
+SSH_KEY_DIR = os.path.join(BASE_DIR, 'keys')
+SERVER_KEY_DIR = os.path.join(SSH_KEY_DIR, 'server')
+LOGIN_NAME = getpass.getuser()
 
 
 def color_print(msg, color='blue'):
-    """
-    Print colorful string.
-    颜色打印
-    """
+    """Print colorful string."""
     color_msg = {'blue': '\033[1;36m%s\033[0m',
                  'green': '\033[1;32m%s\033[0m',
                  'red': '\033[1;31m%s\033[0m'}
@@ -56,63 +53,45 @@ def color_print(msg, color='blue'):
 
 
 def color_print_exit(msg, color='red'):
-    """
-    Print colorful string and exit.
-    颜色打印并推出
-    """
+    """Print colorful string and exit."""
     color_print(msg, color=color)
     time.sleep(2)
     sys.exit()
 
 
 def get_win_size():
-    """
-    This function use to get the size of the windows!
-    获得terminal窗口大小
-    """
+    """This function use to get the size of the windows!"""
     if 'TIOCGWINSZ' in dir(termios):
         TIOCGWINSZ = termios.TIOCGWINSZ
     else:
-        TIOCGWINSZ = 1074295912L
+        TIOCGWINSZ = 1074295912L  # Assume
     s = struct.pack('HHHH', 0, 0, 0, 0)
     x = fcntl.ioctl(sys.stdout.fileno(), TIOCGWINSZ, s)
     return struct.unpack('HHHH', x)[0:2]
 
 
 def set_win_size(sig, data):
-    """
-    This function use to set the window size of the terminal!
-    设置terminal窗口大小
-    """
+    """This function use to set the window size of the terminal!"""
     try:
         win_size = get_win_size()
         channel.resize_pty(height=win_size[0], width=win_size[1])
-    except Exception:
+    except:
         pass
 
 
 def log_record(username, host):
-    """
-    Logging user command and output.
-    记录用户的日志
-    """
-    connect_log_dir = os.path.join(log_dir, 'connect')
+    """Logging user command and output."""
+    connect_log_dir = os.path.join(LOG_DIR, 'connect')
     timestamp_start = int(time.time())
     today = time.strftime('%Y%m%d', time.localtime(timestamp_start))
     time_now = time.strftime('%H%M%S', time.localtime(timestamp_start))
     today_connect_log_dir = os.path.join(connect_log_dir, today)
     log_filename = '%s_%s_%s.log' % (username, host, time_now)
     log_file_path = os.path.join(today_connect_log_dir, log_filename)
-    dept = User.objects.filter(username=username)
-    if dept:
-        dept = dept[0]
-        dept_name = dept.name
-    else:
-        dept_name = 'None'
-
+    dept_name = User.objects.get(username=username).dept.name
     pid = os.getpid()
     pts = os.popen("ps axu | grep %s | grep -v grep | awk '{ print $7 }'" % pid).read().strip()
-    remote_ip = os.popen("who | grep %s | awk '{ print $5 }'" % pts).read().strip('()\n')
+    ip_list = os.popen("who | grep %s | awk '{ print $5 }'" % pts).read().strip('()\n')
 
     if not os.path.isdir(today_connect_log_dir):
         try:
@@ -126,9 +105,9 @@ def log_record(username, host):
     except IOError:
         raise ServerError('Create logfile failed, Please modify %s permission.' % today_connect_log_dir)
 
-    log = Log(user=username, host=host, remote_ip=remote_ip, dept_name=dept_name,
+    log = Log(user=username, host=host, remote_ip=ip_list, dept_name=dept_name,
               log_path=log_file_path, start_time=datetime.datetime.now(), pid=pid)
-    log_file.write('Start time is %s\n' % datetime.datetime.now())
+    log_file.write('Starttime is %s\n' % datetime.datetime.now())
     log.save()
     return log_file, log
 
@@ -136,7 +115,6 @@ def log_record(username, host):
 def posix_shell(chan, username, host):
     """
     Use paramiko channel connect server interactive.
-    使用paramiko模块的channel，连接后端，进入交互式
     """
     log_file, log = log_record(username, host)
     old_tty = termios.tcgetattr(sys.stdin)
@@ -148,7 +126,7 @@ def posix_shell(chan, username, host):
         while True:
             try:
                 r, w, e = select.select([chan, sys.stdin], [], [])
-            except Exception:
+            except:
                 pass
 
             if chan in r:
@@ -171,20 +149,17 @@ def posix_shell(chan, username, host):
 
     finally:
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
-        log_file.write('End time is %s' % datetime.datetime.now())
+        log_file.write('Endtime is %s' % datetime.datetime.now())
         log_file.close()
         log.is_finished = True
         log.log_finished = False
         log.end_time = datetime.datetime.now()
         log.save()
-        # print_prompt()
+        print_prompt()
 
 
-def get_user_host_group(username):
-    """
-    Get the host groups of under the user control.
-    获取用户有权限的主机组
-    """
+def get_user_hostgroup(username):
+    """Get the hostgroups of under the user control."""
     groups_attr = {}
     group_all = user_perm_group_api(username)
     for group in group_all:
@@ -192,25 +167,17 @@ def get_user_host_group(username):
     return groups_attr
 
 
-def get_host_group_host(username, gid):
-    """
-    Get the host group hosts of under the user control.
-    获取用户有权限主机组下的主机
-    """
-    groups_attr = get_user_host_group(username)
-    groups_ids = [attr[0] for name, attr in groups_attr.items()]
+def get_user_hostgroup_host(username, gid):
+    """Get the hostgroup hosts of under the user control."""
     hosts_attr = {}
-    if gid in groups_ids:
-        user = User.objects.filter(username=username)
-        if user:
-            user = user[0]
-            hosts = user_perm_group_hosts_api(gid)
-            for host in hosts:
-                alias = AssetAlias.objects.filter(user=user, host=host)
-                if alias and alias[0].alias != '':
-                    hosts_attr[host.ip] = [host.id, host.ip, alias[0].alias]
-                else:
-                    hosts_attr[host.ip] = [host.id, host.ip, host.comment]
+    user = User.objects.get(username=username)
+    hosts = user_perm_group_hosts_api(gid)
+    for host in hosts:
+        alias = AssetAlias.objects.filter(user=user, host=host)
+        if alias and alias[0].alias != '':
+            hosts_attr[host.ip] = [host.id, host.ip, alias[0].alias]
+        else:
+            hosts_attr[host.ip] = [host.id, host.ip, host.comment]
     return hosts_attr
 
 
@@ -239,7 +206,7 @@ def verify_connect(username, part_ip):
         color_print('No Permission or No host.', 'red')
     else:
         username, password, host, port = get_connect_item(username, ip_matched[0])
-        connect(username, password, host, port, login_name)
+        connect(username, password, host, port, LOGIN_NAME)
 
 
 def print_prompt():
@@ -268,7 +235,7 @@ def print_user_host(username):
 
 
 def print_user_hostgroup(username):
-    group_attr = get_user_host_group(username)
+    group_attr = get_user_hostgroup(username)
     groups = group_attr.keys()
     for g in groups:
         print "[%3s] %s -- %s" % (group_attr[g][0], g, group_attr[g][1])
@@ -278,7 +245,7 @@ def print_user_hostgroup_host(username, gid):
     pattern = re.compile(r'\d+')
     match = pattern.match(gid)
     if match:
-        hosts_attr = get_host_group_host(username, gid)
+        hosts_attr = get_user_hostgroup_host(username, gid)
         hosts = hosts_attr.keys()
         hosts.sort()
         for ip in hosts:
@@ -357,7 +324,7 @@ def multi_remote_exec_cmd(hosts, username, cmd):
 
 def exec_cmd_servers(username):
     color_print("You can choose in the following IP(s), Use glob or ips split by comma. q/Q to PreLayer.", 'green')
-    print_user_host(login_name)
+    print_user_host(LOGIN_NAME)
     while True:
         hosts = []
         inputs = raw_input('\033[1;32mip(s)>: \033[0m')
@@ -385,7 +352,7 @@ def exec_cmd_servers(username):
             cmd = raw_input('\033[1;32mCmd(s): \033[0m')
             if cmd in ['q', 'Q']:
                 break
-            exec_log_dir = os.path.join(log_dir, 'exec_cmds')
+            exec_log_dir = os.path.join(LOG_DIR, 'exec_cmds')
             if not os.path.isdir(exec_log_dir):
                 os.mkdir(exec_log_dir)
                 os.chmod(exec_log_dir, 0777)
@@ -409,22 +376,22 @@ if __name__ == '__main__':
             except KeyboardInterrupt:
                 sys.exit(0)
             if option in ['P', 'p']:
-                print_user_host(login_name)
+                print_user_host(LOGIN_NAME)
                 continue
             elif option in ['G', 'g']:
-                print_user_hostgroup(login_name)
+                print_user_hostgroup(LOGIN_NAME)
                 continue
             elif gid_pattern.match(option):
                 gid = option[1:].strip()
-                print_user_hostgroup_host(login_name, gid)
+                print_user_hostgroup_host(LOGIN_NAME, gid)
                 continue
             elif option in ['E', 'e']:
-                exec_cmd_servers(login_name)
+                exec_cmd_servers(LOGIN_NAME)
             elif option in ['Q', 'q', 'exit']:
                 sys.exit()
             else:
                 try:
-                    verify_connect(login_name, option)
+                    verify_connect(LOGIN_NAME, option)
                 except ServerError, e:
                     color_print(e, 'red')
     except IndexError:
