@@ -12,7 +12,6 @@ import ldap
 from ldap import modlist
 import hashlib
 import datetime
-import random
 import subprocess
 from django.core.paginator import Paginator, EmptyPage, InvalidPage
 from django.http import HttpResponse, Http404
@@ -24,33 +23,20 @@ from jasset.models import AssetAlias
 from django.core.exceptions import ObjectDoesNotExist
 from django.core.mail import send_mail
 import json
-import logging
 
 
 BASE_DIR = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 CONF = ConfigParser()
 CONF.read(os.path.join(BASE_DIR, 'easeserver.conf'))
 LOG_DIR = os.path.join(BASE_DIR, 'logs')
-JLOG_FILE = os.path.join(LOG_DIR, 'easeserver.log')
 SSH_KEY_DIR = os.path.join(BASE_DIR, 'keys')
-# SERVER_KEY_DIR = os.path.join(SSH_KEY_DIR, 'server')
+SERVER_KEY_DIR = os.path.join(SSH_KEY_DIR, 'server')
 KEY = CONF.get('base', 'key')
 LOGIN_NAME = getpass.getuser()
 LDAP_ENABLE = CONF.getint('ldap', 'ldap_enable')
 SEND_IP = CONF.get('base', 'ip')
 SEND_PORT = CONF.get('base', 'port')
 MAIL_FROM = CONF.get('mail', 'email_host_user')
-
-log_level = CONF.get('base', 'log')
-log_level_total = {'debug': logging.DEBUG, 'info': logging.INFO, 'warning': logging.WARN, 'error': logging.ERROR,
-                   'critical': logging.CRITICAL}
-logger = logging.getLogger('easeserver')
-logger.setLevel(logging.DEBUG)
-fh = logging.FileHandler(JLOG_FILE)
-fh.setLevel(log_level_total.get(log_level, logging.DEBUG))
-formatter = logging.Formatter('%(asctime)s - %(filename)s - %(levelname)s - %(message)s')
-fh.setFormatter(formatter)
-logger.addHandler(fh)
 
 
 class LDAPMgmt():
@@ -101,6 +87,25 @@ class LDAPMgmt():
         except ldap.LDAPError, e:
             print e
 
+    def decrypt(self, text):
+        cryptor = AES.new(self.key, self.mode, b'0000000000000000')
+        try:
+            plain_text = cryptor.decrypt(a2b_hex(text))
+        except TypeError:
+            raise ServerError('Decrypt password error, TYpe error.')
+        return plain_text.rstrip('\0')
+
+
+if LDAP_ENABLE:
+    LDAP_HOST_URL = CONF.get('ldap', 'host_url')
+    LDAP_BASE_DN = CONF.get('ldap', 'base_dn')
+    LDAP_ROOT_DN = CONF.get('ldap', 'root_dn')
+    LDAP_ROOT_PW = CONF.get('ldap', 'root_pw')
+
+
+def md5_crypt(string):
+    return hashlib.new("md5", string).hexdigest()
+
 
 def page_list_return(total, current=1):
     min_page = current - 2 if current - 4 > 0 else 1
@@ -138,63 +143,34 @@ def pages(posts, r):
 
 
 class PyCrypt(object):
-    """
-    This class used to encrypt and decrypt password.
-    对称加密库
-    """
+    """This class used to encrypt and decrypt password."""
 
     def __init__(self, key):
         self.key = key
         self.mode = AES.MODE_CBC
 
-    @staticmethod
-    def random_pass():
-        """
-        random password
-        随机生成密码
-        """
-        salt_key = '1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!@$%^&*()_'
-        symbol = '!@$%^&*()_'
-        salt_list = []
-        for i in range(60):
-            salt_list.append(random.choice(salt_key))
-        for i in range(4):
-            salt_list.append(random.choice(symbol))
-        salt = ''.join(salt_list)
-        return salt
-
-    @staticmethod
-    def md5_crypt(string):
-        return hashlib.new("md5", string).hexdigest()
-
-    def encrypt(self, passwd=None):
-        """
-        encrypt gen password
-        加密生成密码
-        """
-        if not passwd:
-            passwd = self.random_pass()
-
-        cryptor = AES.new(self.key, self.mode, b'8122ca7d906ad5e1')
-        length = 64
+    def encrypt(self, text):
+        cryptor = AES.new(self.key, self.mode, b'0000000000000000')
+        length = 16
         try:
-            count = len(passwd)
+            count = len(text)
         except TypeError:
             raise ServerError('Encrypt password error, TYpe error.')
-
         add = (length - (count % length))
-        passwd += ('\0' * add)
-        cipher_text = cryptor.encrypt(passwd)
-        return b2a_hex(cipher_text)
+        text += ('\0' * add)
+        ciphertext = cryptor.encrypt(text)
+        return b2a_hex(ciphertext)
 
     def decrypt(self, text):
-        cryptor = AES.new(self.key, self.mode, b'8122ca7d906ad5e1')
+        cryptor = AES.new(self.key, self.mode, b'0000000000000000')
         try:
             plain_text = cryptor.decrypt(a2b_hex(text))
         except TypeError:
-            # raise ServerError('Decrypt password error, TYpe error.')
-            pass
+            raise ServerError('Decrypt password error, TYpe error.')
         return plain_text.rstrip('\0')
+
+
+CRYPTOR = PyCrypt(KEY)
 
 
 class ServerError(Exception):
@@ -296,195 +272,63 @@ def api_user(request):
     return HttpResponse(json_data)
 
 
-# def view_splitter(request, su=None, adm=None):
-#     if is_super_user(request):
-#         return su(request)
-#     elif is_group_admin(request):
-#         return adm(request)
-#     else:
-#         return HttpResponseRedirect('/login/')
+def view_splitter(request, su=None, adm=None):
+    if is_super_user(request):
+        return su(request)
+    elif is_group_admin(request):
+        return adm(request)
+    else:
+        return HttpResponseRedirect('/login/')
 
 
-# def user_group_perm_asset_group_api(user_group):
-#     asset_group_list = []
-#     perm_list = user_group.perm_set.all()
-#     for perm in perm_list:
-#         asset_group_list.append(perm.asset_group)
-#     return asset_group_list
+def user_group_perm_asset_group_api(user_group):
+    asset_group_list = []
+    perm_list = user_group.perm_set.all()
+    for perm in perm_list:
+        asset_group_list.append(perm.asset_group)
+    return asset_group_list
 
 
-class Juser(object):
-    """
-    easeserver user class
-    用户类
-    """
-
-    def __init__(self, username=None, uid=None):
-        if username:
-            user = User.objects.filter(username=username)
-        elif uid:
-            user = User.objects.filter(id=uid)
-        else:
-            user = ''
-
-        if user:
-            user = user[0]
-            self.user = user
-            self.id = user.id
-            # self.id = user.id
-            # self.username = user.username
-            # self.name = user.name
-            self.group = user.group.all()
-        else:
-            self.id = None
-
-    def __repr__(self):
-        if self.id:
-            return '<%s Juser instance>' % getattr(self.user, 'username')
-        else:
-            return 'None'
-
-    def __getattr__(self, item):
-        if self.id:
-            return getattr(self.user, item)
-        else:
-            return None
-
-    def validate(self):
-        """
-        Validate is or not a true user
-        鉴定用户
-        """
-        if self.id:
-            return True
-        else:
-            return False
-
-    def get_asset_group(self):
-        """
-        Get user host_groups.
-        获取用户有权限的主机组
-        """
-        host_group_list = []
+def user_perm_group_api(username):
+    if username:
+        user = User.objects.get(username=username)
         perm_list = []
-        user_group_all = self.user.group.all()
+        user_group_all = user.group.all()
         for user_group in user_group_all:
             perm_list.extend(user_group.perm_set.all())
 
+        asset_group_list = []
         for perm in perm_list:
-            host_group_list.append(perm.asset_group)
-
-        return host_group_list
-
-    def get_asset_group_info(self, printable=False):
-        """
-        Get or print asset group info
-        获取或打印用户授权资产组
-        """
-        asset_groups_info = {}
-        asset_groups = self.get_asset_group()
-
-        for asset_group in asset_groups:
-            asset_groups_info[asset_group.id] = [asset_group.name, asset_group.comment]
-
-        if printable:
-            for group_id in asset_groups_info:
-                if asset_groups_info[group_id][1]:
-                    print "[%3s] %s -- %s" % (group_id,
-                                              asset_groups_info[group_id][0],
-                                              asset_groups_info[group_id][1])
-                else:
-                    print "[%3s] %s" % (group_id, asset_groups_info[group_id][0])
-                print ''
-        else:
-            return asset_groups_info
-
-    def get_asset(self):
-        """
-        Get the assets of under the user control.
-        获取主机列表
-        """
-        assets = []
-        asset_groups = self.get_asset_group()
-
-        for asset_group in asset_groups:
-            assets.extend(asset_group.asset_set.all())
-
-        return assets
-
-    def get_asset_info(self, printable=False):
-        """
-        Get or print the user asset info
-        获取或打印用户资产信息
-        """
-        assets_info = {}
-        assets = self.get_asset()
-
-        for asset in assets:
-            asset_alias = AssetAlias.objects.filter(user=self.user, asset=asset)
-            if asset_alias and asset_alias[0].alias != '':
-                assets_info[asset.ip] = [asset.id, asset.ip, str(asset_alias[0].alias)]
-            else:
-                assets_info[asset.ip] = [asset.id, asset.ip, str(asset.comment)]
-
-        if printable:
-            ips = assets_info.keys()
-            ips.sort()
-            for ip in ips:
-                if assets_info[ip][2]:
-                    print '%-15s -- %s' % (ip, assets_info[ip][2])
-                else:
-                    print '%-15s' % ip
-            print ''
-        else:
-            return assets_info
+            asset_group_list.append(perm.asset_group)
+        return asset_group_list
 
 
-class Jasset(object):
-    """
-    easeserver asset class
-    easeserver资产类
-    """
-    def __init__(self, ip=None, id=None):
-        if ip:
-            asset = Asset.objects.filter(ip=ip)
-        elif id:
-            asset = Asset.objects.filter(id=id)
-        else:
-            asset = ''
+def user_perm_group_hosts_api(gid):
+    hostgroup = BisGroup.objects.filter(id=gid)
+    if hostgroup:
+        return hostgroup[0].asset_set.all()
+    else:
+        return []
 
-        if asset:
-            asset = asset[0]
-            self.asset = asset
-            self.id = asset.id
-        else:
-            self.id = None
 
-    def __repr__(self):
-        if self.id:
-            return '<%s Jasset instance>' % self.asset.ip
-        else:
-            return 'None'
+def user_perm_asset_api(username):
+    user = User.objects.filter(username=username)
+    if user:
+        user = user[0]
+        asset_list = []
+        asset_group_list = user_perm_group_api(user)
+        for asset_group in asset_group_list:
+            asset_list.extend(asset_group.asset_set.all())
+        asset_list = list(set(asset_list))
+        return asset_list
+    else:
+        return []
 
-    def __getattr__(self, item):
-        if self.id:
-            return getattr(self.asset, item)
-        else:
-            return None
 
-    def validate(self):
-        """
-        Validate is or not a true asset
-        判断是否存在
-        """
-        if self.id:
-            return True
-        else:
-            return False
-
-    def get_user(self):
+def asset_perm_api(asset):
+    if asset:
         perm_list = []
-        asset_group_all = self.asset.bis_group.all()
+        asset_group_all = asset.bis_group.all()
         for asset_group in asset_group_all:
             perm_list.extend(asset_group.perm_set.all())
 
@@ -499,99 +343,51 @@ class Jasset(object):
         return user_permed_list
 
 
-class JassetGroup(object):
-    """
-    easeserver AssetGroup class
-    easeserver 资产组类
-    """
-    def __init__(self, name=None, id=None):
-        if id:
-            asset_group = BisGroup.objects.filter(id=int(id))
-        elif name:
-            asset_group = BisGroup.objects.filter(name=name)
-        else:
-            asset_group = ''
-
-        if asset_group:
-            asset_group = asset_group[0]
-            self.asset_group = asset_group
-            # self.name = asset_group.name
-            self.id = asset_group.id
-        else:
-            self.id = None
-
-    def __repr__(self):
-        if self.id:
-            return '<%s JassetGroup instance>' % self.name
-        else:
-            return 'None'
-
-    def validate(self):
-        """
-        Validate it is a true asset group or not
-        鉴定是否为真是存在的组
-        """
-        if self.id:
-            return True
-        else:
-            return False
-
-    def get_asset(self):
-        return self.asset_group.asset_set.all()
-
-    def get_asset_info(self, printable=False):
-        assets = self.get_asset()
-        for asset in assets:
-            if asset.comment:
-                print '%-15s -- %s' % (asset.ip, asset.comment)
+def get_user_host(username):
+    """Get the hosts of under the user control."""
+    hosts_attr = {}
+    asset_all = user_perm_asset_api(username)
+    user = User.objects.filter(username=username)
+    if user:
+        user = user[0]
+        for asset in asset_all:
+            alias = AssetAlias.objects.filter(user=user, host=asset)
+            if alias and alias[0].alias != '':
+                hosts_attr[asset.ip] = [asset.id, asset.ip, alias[0].alias]
             else:
-                print '%-15s' % asset.ip
-        print ''
-
-    def get_asset_num(self):
-        return len(self.get_asset())
-
-    def get_user_group(self):
-        perm_list = self.asset_group.perm_set.all()
-        user_group_list = []
-        for perm in perm_list:
-            user_group_list.append(perm.user_group)
-        return user_group_list
-
-    def get_user(self):
-        user_list = []
-        user_group_list = self.get_user_group()
-        for user_group in user_group_list:
-            user_list.extend(user_group.user_set.all())
-        return user_list
-
-    def is_permed(self, user=None, user_group=None):
-        if user:
-            if user in self.get_user():
-                return True
-
-        if user_group:
-            if user_group in self.get_user_group():
-                return True
-        return False
+                hosts_attr[asset.ip] = [asset.id, asset.ip, asset.comment]
+        return hosts_attr
+    else:
+        raise ServerError('User %s does not exit!' % username)
 
 
-# def asset_perm_api(asset):
-#     if asset:
-#         perm_list = []
-#         asset_group_all = asset.bis_group.all()
-#         for asset_group in asset_group_all:
-#             perm_list.extend(asset_group.perm_set.all())
-#
-#         user_group_list = []
-#         for perm in perm_list:
-#             user_group_list.append(perm.user_group)
-#
-#         user_permed_list = []
-#         for user_group in user_group_list:
-#             user_permed_list.extend(user_group.user_set.all())
-#         user_permed_list = list(set(user_permed_list))
-#         return user_permed_list
+def get_connect_item(username, ip):
+    asset = get_object(Asset, ip=ip)
+    port = int(asset.port)
+
+    if not asset.is_active:
+        raise ServerError('Host %s is not active.' % ip)
+
+    user = get_object(User, username=username)
+
+    if not user.is_active:
+        raise ServerError('User %s is not active.' % username)
+
+    login_type_dict = {
+        'L': user.ldap_pwd,
+    }
+
+    if asset.login_type in login_type_dict:
+        password = CRYPTOR.decrypt(login_type_dict[asset.login_type])
+        return username, password, ip, port
+
+    elif asset.login_type == 'M':
+        username = asset.username
+        password = CRYPTOR.decrypt(asset.password)
+        return username, password, ip, port
+
+    else:
+        raise ServerError('Login type is not in ["L", "M"]')
 
 
 def validate(request, user_group=None, user=None, asset_group=None, asset=None, edept=None):
@@ -695,22 +491,28 @@ def is_dir(dir_name, username='root', mode=0755):
     os.chmod(dir_name, mode)
 
 
-def http_success(request, msg):
+def success(request, msg):
     return render_to_response('success.html', locals())
 
 
-def http_error(request, emg):
+def httperror(request, emg):
     message = emg
     return render_to_response('error.html', locals())
 
 
-CRYPTOR = PyCrypt(KEY)
+def node_auth(request):
+    username = request.POST.get('username', ' ')
+    seed = request.POST.get('seed', ' ')
+    filename = request.POST.get('filename', ' ')
+    user = User.objects.filter(username=username, password=seed)
+    auth = 1
+    if not user:
+        auth = 0
+    if not filename.startswith('/opt/easeserver/logs/connect/'):
+        auth = 0
+    if auth:
+        result = {'auth': {'username': username, 'result': 'success'}}
+    else:
+        result = {'auth': {'username': username, 'result': 'failed'}}
 
-if LDAP_ENABLE:
-    LDAP_HOST_URL = CONF.get('ldap', 'host_url')
-    LDAP_BASE_DN = CONF.get('ldap', 'base_dn')
-    LDAP_ROOT_DN = CONF.get('ldap', 'root_dn')
-    LDAP_ROOT_PW = CONF.get('ldap', 'root_pw')
-    ldap_conn = LDAPMgmt(LDAP_HOST_URL, LDAP_BASE_DN, LDAP_ROOT_DN, LDAP_ROOT_PW)
-else:
-    ldap_conn = None
+    return HttpResponse(json.dumps(result, sort_keys=True, indent=2), content_type='application/json')
