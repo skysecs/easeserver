@@ -116,10 +116,13 @@ def bool2str(value):
 #     return True
 #
 
-@register.filter(name='member_count')
-def member_count(group_id):
-    group = UserGroup.objects.get(id=group_id)
-    return group.user_set.count()
+@register.filter(name='members_count')
+def members_count(group_id):
+    group = get_object(UserGroup, id=group_id)
+    if group:
+        return group.user_set.count()
+    else:
+        return 0
 
 
 @register.filter(name='group_user_count')
@@ -359,12 +362,18 @@ def sudo_cmd_count(user_group_id):
 
 
 @register.filter(name='sudo_cmd_count')
-def sudo_cmd_count(cmd_group_id):
-    cmd_group = CmdGroup.objects.filter(id=cmd_group_id)
+def sudo_cmd_count(user_group_id):
+    user_group = UserGroup.objects.filter(id=user_group_id)
     cmds = []
-    if cmd_group:
-        cmd_group = cmd_group[0]
-        return len(set(cmd_group.cmd.split(',')))
+    if user_group:
+        user_group = user_group[0]
+        cmd_groups = []
+        for perm in user_group.sudoperm_set.all():
+            cmd_groups.extend(perm.cmd_group.all())
+
+        for cmd_group in cmd_groups:
+            cmds.extend(cmd_group.cmd.split(','))
+        return len(set(cmds))
     else:
         return 0
 
